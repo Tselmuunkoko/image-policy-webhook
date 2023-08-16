@@ -1,31 +1,29 @@
 package main
 
 import (
-    "fmt"
-    "log"
-    "net/http"
-	"io/ioutil"
-	"k8s.io/api/imagepolicy/v1alpha1"
+	"fmt"
+	"log"
+	"net/http"
 	"encoding/json"
 	"regexp"
-	// "sort"
+	"sort"
+	"io/ioutil"
+	"k8s.io/api/imagepolicy/v1alpha1"
 )
 
-const dockerImagePattern = `^(?P<registry>.+?\/)?(?P<project>[\w\-]+)\/(?P<image>[\w\-]+):(?P<tag>[\w\-.]+)$`
-const dockerImageHashPattern =`^(?P<registry>.+?\/)?(?P<project>[\w\-]+)\/(?P<image>[\w\-]+)@(?P<hash>sha256:[\w]+)?$`
+const (
+	dockerImagePattern     = `^(?P<registry>.+?\/)?(?P<project>[\w\-]+)\/(?P<image>[\w\-]+):(?P<tag>[\w\-.]+)$`
+	dockerImageHashPattern = `^(?P<registry>.+?\/)?(?P<project>[\w\-]+)\/(?P<image>[\w\-]+)@(?P<hash>sha256:[\w]+)?$`
+)
 
-// func checkWhiteList(registry string) (result bool) {
-// 	whitelist := []string{'harbor.it.org'}
-// 	index := sort.SearchStrings(whitelist, registry)
-// 	if index < len(whitelist) && whitelist[index] == registry {
-// 		result = true
-// 		return 
-// 	} else {
-// 		result = false
-// 		return
-// 	}
-// }
-func splitDockerImage(imageStr string) (registry, project, image, tag string, hash string, err error) {
+var whitelist = []string{"harbor.it.org/"}
+
+func checkWhiteList(registry string) bool {
+	index := sort.SearchStrings(whitelist, registry)
+	return !(index < len(whitelist) && whitelist[index] == registry)
+}
+
+func splitDockerImage(imageStr string) (registry, project, image, tag, hash string, err error) {
 	re := regexp.MustCompile(dockerImagePattern)
 	re1 := regexp.MustCompile(dockerImageHashPattern)
 	matches := re.FindStringSubmatch(imageStr)
@@ -38,7 +36,6 @@ func splitDockerImage(imageStr string) (registry, project, image, tag string, ha
 				matchMap[name] = matches[i]
 			}
 		}
-
 		registry = matchMap["registry"]
 		project = matchMap["project"]
 		image = matchMap["image"]
@@ -50,7 +47,6 @@ func splitDockerImage(imageStr string) (registry, project, image, tag string, ha
 				matchMap[name] = matches1[i]
 			}
 		}
-
 		registry = matchMap["registry"]
 		project = matchMap["project"]
 		image = matchMap["image"]
@@ -61,62 +57,78 @@ func splitDockerImage(imageStr string) (registry, project, image, tag string, ha
 	return
 }
 
-
 func helloHandler(w http.ResponseWriter, r *http.Request) {
-    if r.URL.Path != "/hello" {
-        http.Error(w, "404 not found.", http.StatusNotFound)
-        return
-    }
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 
-    if (r.Method == "GET" || r.Method == "POST") {
-        reqBody, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			fmt.Printf("server: could not read request body: %s\n", err)
-		}
-		var imageReview v1alpha1.ImageReview
-		var resultReview v1alpha1.ImageReview
-		err = json.Unmarshal(reqBody, &imageReview)
-		if err != nil {
-			fmt.Println("Error:", err)
-			return
-		}
-		for _, container := range imageReview.Spec.Containers {
-			registry, project, image, tag, hash, err := splitDockerImage(container.Image)
-			if err != nil {
-				fmt.Println("Error:", err)
-				return
-			}
-			fmt.Println("Registry:", registry)
-			fmt.Println("Project:", project)
-			fmt.Println("Image:", image)
-			fmt.Println("Tag:", tag)
-			fmt.Println("Hash:", hash)
-			// if tag == nil || tag == 'latest' || checkWhiteList(registry) {
-			// 	resultReview.Status.Allowed = false
-			// 	fmt.Fprintf(w, json.marshal(resultReview))
-			// }
-		}
-		// fmt.Fprintf(w, "h")
-		resultReview.Status.Allowed = true
-		jsonData, err := json.Marshal(resultReview)
-		if err != nil {
-			fmt.Println("Error:", err)
-			return
-		}
-		fmt.Fprint(w, string(jsonData), http.StatusOK)
-    } else {
-		http.Error(w, "Method is not supported.", http.StatusNotFound)
-        return
+	if r.URL.Path != "/hello" {
+		http.Error(w, "404 not found.", http.StatusNotFound)
+		return
 	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method is not supported.", http.StatusNotFound)
+		return
+	}
+
+	reqBody, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("server: could not read request body: %s\n", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	var imageReview v1alpha1.ImageReview
+	err = json.Unmarshal(reqBody, &imageReview)
+	if err != nil {
+		log.Println("Error in JSON data:", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	var resultReview v1alpha1.ImageReview
+	var images = false
+	for _, container := range imageReview.Spec.Containers {
+		registry, project, image, tag, hash, err := splitDockerImage(container.Image)
+		if err != nil {
+			log.Println("Error:", err)
+			fmt.Println("Couldn't pass the requirement")
+			w.WriteHeader(http.StatusOK)
+			jsonData, _ := json.Marshal(resultReview)
+			w.Write(jsonData)
+			return
+		}
+		images = true
+		fmt.Println("Registry:", registry)
+		fmt.Println("Project:", project)
+		fmt.Println("Image:", image)
+		fmt.Println("Tag:", tag)
+		fmt.Println("Hash:", hash)
+		if tag == "" || tag == "latest" || checkWhiteList(registry) {
+			fmt.Println("Couldn't pass the requirement")
+			w.WriteHeader(http.StatusOK)
+			jsonData, _ := json.Marshal(resultReview)
+			w.Write(jsonData)
+			return
+		}
+	}
+
+	resultReview.Status.Allowed = images
+	jsonData, err := json.Marshal(resultReview)
+	if err != nil {
+		log.Println("Error:", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonData)
 }
 
-
 func main() {
-    http.HandleFunc("/hello", helloHandler) // Update this line of code
-
-
-    fmt.Printf("Starting server at port 8080\n")
-    if err := http.ListenAndServe(":8080", nil); err != nil {
-        log.Fatal(err)
-    }
+	http.HandleFunc("/hello", helloHandler)
+	fmt.Printf("Starting server at port 8080\n")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		log.Fatal(err)
+	}
 }
