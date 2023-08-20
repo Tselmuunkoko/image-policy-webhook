@@ -159,18 +159,24 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	http.HandleFunc("/hello", helloHandler)
 	// get port
-	port, port_exists := os.LookupEnv("PORT")
-	if !port_exists {
-		logger.Error("Port variable not found")
+	envVarsExists := []string{"PORT", "WHITE_LIST"}
+	envVars := make(map[string]string)
+	notFoundVars := []string{}
+	for _, env := range envVarsExists {
+		el, exists := os.LookupEnv(env)
+		if !exists {
+			notFoundVars = append(notFoundVars, env)
+		} else {
+			envVars[env] = el
+		}
+	}
+	if len(notFoundVars) != 0 {
+		logger.Info( strings.Join(notFoundVars, ", ") + " variables are not found! MUST fill these enviroment variables!")
 		return
 	}
+
 	// GET WHITELIST
-	list, list_exists := os.LookupEnv("WHITE_LIST")
-	if !list_exists {
-		logger.Error("White list variable not found")
-		return
-	}
-	WHITELIST = strings.Split(list, ",")
+	WHITELIST = strings.Split(envVars["WHITE_LIST"], ",")
 	for i, el := range WHITELIST {
 		el = strings.Replace(el, " ", "", -1)
 		WHITELIST[i] = el
@@ -182,7 +188,7 @@ func main() {
 		el = strings.Replace(el, " ", "", -1)
 		EXCLUDE_NAMESPACES[i] = el
 	}
-	fmt.Printf("Starting server at port %s\n", port)
+	fmt.Printf("Starting server at port %s\n", envVars["PORT"])
 
 	if os.Getenv("DEBUG") == "false" {
 		logger = zap.Must(zap.NewProduction())
@@ -192,7 +198,7 @@ func main() {
 	logger.Debug("WHITELIST: " + strings.Join(WHITELIST, " | "))
 	logger.Debug("EXCLUDED NAMESPACES: " + strings.Join(EXCLUDE_NAMESPACES, " | "))
 
-	if err := http.ListenAndServe(":" + string(port), nil); err != nil {
+	if err := http.ListenAndServe(":" + string(envVars["PORT"]), nil); err != nil {
 		logger.Fatal(err.Error())
 	}
 }
