@@ -13,7 +13,8 @@ import (
 )
 
 var logger = zap.Must(zap.NewDevelopment())
-var whitelist = []string{}
+var WHITELIST = []string{}
+var EXCLUDE_NAMESPACES = []string{}
 
 const (
 	dockerImagePattern     = `^(?P<registry>.+?\/)?(?P<project>[\w\-]+)\/(?P<image>[\w\-]+):(?P<tag>[\w\-.]+)$`
@@ -21,12 +22,22 @@ const (
 )
 
 func checkWhiteList(registry string) bool {
-	for _, el := range whitelist {
+	registry = strings.Replace(registry, "/", "", -1)
+	for _, el := range WHITELIST {
 		if el == registry {
 			return false
 		}
 	}
 	return true
+}
+
+func isExcluded(namespace string) bool {
+	for _, el := range EXCLUDE_NAMESPACES {
+		if el == namespace {
+			return true
+		}
+	}
+	return false
 }
 
 func splitDockerImage(imageStr string) (registry, project, image, tag, hash string, err error) {
@@ -59,7 +70,6 @@ func splitDockerImage(imageStr string) (registry, project, image, tag, hash stri
 		hash = matchMap["hash"]
 	} else {
 		err = fmt.Errorf("invalid image format")
-		logger.Error("invalid image format")
 	}
 	return
 }
@@ -87,7 +97,7 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Debug("Request body: " + string(reqBody))
 	if err != nil {
-		logger.Error("server: could not read request body:" + err.Error())
+		logger.Debug("server: could not read request body:" + err.Error())
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -96,17 +106,24 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 	err = json.Unmarshal(reqBody, &imageReview)
 
 	if err != nil {
-		logger.Error("Error in JSON data:" + err.Error())
+		logger.Debug("Error in JSON data:" + err.Error())
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	var resultReview v1alpha1.ImageReview
+	if isExcluded(imageReview.Spec.Namespace) {
+		resultReview.Status.Allowed = true
+		jsonData, _ := json.Marshal(resultReview)
+		logger.Info("Passed the requirement")
+		w.WriteHeader(http.StatusOK)
+		w.Write(jsonData)
+		return
+	}
 	var images = false
 	for _, container := range imageReview.Spec.Containers {
 		registry, project, image, tag, hash, err := splitDockerImage(container.Image)
 		if err != nil {
-			logger.Error("Error:" + err.Error())
 			logger.Info("Couldn't pass the requirement")
 			w.WriteHeader(http.StatusOK)
 			jsonData, _ := json.Marshal(resultReview)
@@ -131,7 +148,6 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 	resultReview.Status.Allowed = images
 	jsonData, err := json.Marshal(resultReview)
 	if err != nil {
-		logger.Error("Error:"+ err.Error())
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -142,9 +158,30 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/hello", helloHandler)
-	port := os.Getenv("PORT")
-	list := os.Getenv("WHITE_LIST")
-	whitelist = strings.Split(list, ",")
+	// get port
+	port, port_exists := os.LookupEnv("PORT")
+	if !port_exists {
+		logger.Error("Port variable not found")
+		return
+	}
+	// GET WHITELIST
+	list, list_exists := os.LookupEnv("WHITE_LIST")
+	if !list_exists {
+		logger.Error("White list variable not found")
+		return
+	}
+	WHITELIST = strings.Split(list, ",")
+	for i, el := range WHITELIST {
+		el = strings.Replace(el, " ", "", -1)
+		WHITELIST[i] = el
+	}
+	// GET EXCLUDED NAMESPACES
+	exclude_list := os.Getenv("EXCLUDE_NAMESPACES")
+	EXCLUDE_NAMESPACES = strings.Split(exclude_list, ",")
+	for i, el := range EXCLUDE_NAMESPACES {
+		el = strings.Replace(el, " ", "", -1)
+		EXCLUDE_NAMESPACES[i] = el
+	}
 	fmt.Printf("Starting server at port %s\n", port)
 
 	if os.Getenv("DEBUG") == "false" {
@@ -152,7 +189,9 @@ func main() {
 	}
 	defer logger.Sync()
 	logger.Info("Logger initialized")
-	logger.Debug("WhiteList: " + strings.Join(whitelist, " | "))
+	logger.Debug("WHITELIST: " + strings.Join(WHITELIST, " | "))
+	logger.Debug("EXCLUDED NAMESPACES: " + strings.Join(EXCLUDE_NAMESPACES, " | "))
+
 	if err := http.ListenAndServe(":" + string(port), nil); err != nil {
 		logger.Fatal(err.Error())
 	}
