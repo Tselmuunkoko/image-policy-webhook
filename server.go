@@ -158,7 +158,7 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/hello", helloHandler)
-	// get port
+	// Required env vars
 	envVarsExists := []string{"PORT", "WHITE_LIST"}
 	envVars := make(map[string]string)
 	notFoundVars := []string{}
