@@ -1,4 +1,4 @@
-module example/ot
+module k8s/ot
 
 go 1.21.0
 
