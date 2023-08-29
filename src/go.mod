@@ -1,4 +1,4 @@
-module k8s/ipw
+module k8s/src
 
 go 1.21.0
 
