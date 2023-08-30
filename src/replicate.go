@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"bytes"
+	"strconv"
 )
 
 func replicate(imageReview *v1alpha1.ImageReview) (resultReview *v1alpha1.ImageReview)  {
@@ -20,7 +21,9 @@ func replicate(imageReview *v1alpha1.ImageReview) (resultReview *v1alpha1.ImageR
 		return
 	}
 	logger.Info("Replication started!")
-	reason := make(map[string]string)
+	// reason := make(map[string]string)
+	pull_e := 0
+	push_e := 0
 	cli, err := client.NewClientWithOpts(client.WithHost(REPLICATOR_ENV_VARS["APP_DOCKER_HOST"]))
 	if err != nil {
 		panic(err)
@@ -48,15 +51,31 @@ func replicate(imageReview *v1alpha1.ImageReview) (resultReview *v1alpha1.ImageR
 			logger.Info("Trying pull " + container.Image + " image.")
 			out, err := cli.ImagePull(context.Background(), container.Image, types.ImagePullOptions{})
 			if err != nil {
-				panic(err)
+				logger.Error("Image pull error: " + err.Error())
+				// reason = "error -> replication:pull"
+				pull_e += 1
+				continue
+				// panic(err)
 			}
 			defer out.Close()
 
 			// Print the pull progress
-			_, err = io.Copy(os.Stdout, out)
+			var outputBuffer bytes.Buffer
+			_, err = io.Copy(io.MultiWriter(&outputBuffer, os.Stdout), out)
 			if err != nil {
 				logger.Error("Error copying image pull output:" + err.Error())
-				reason[container.Image] = "Couldn't pull this image"
+				// reason[container.Image] = "Couldn't pull this image"
+				// reason = "error -> replication:pull"
+				pull_e += 1
+				continue
+
+			}
+			capturedOutput := outputBuffer.String()
+
+			if strings.Contains(capturedOutput, "error") {
+				// reason = "error -> replication:pull"
+				pull_e += 1
+				continue
 			} else {
 				pulled_images = append(pulled_images, container.Image)
 				logger.Info(container.Image + " pulled successfully!")
@@ -88,20 +107,24 @@ func replicate(imageReview *v1alpha1.ImageReview) (resultReview *v1alpha1.ImageR
 		pushOut, err := cli.ImagePush(context.Background(), t_image, pushOpts)
 		defer pushOut.Close()
 		if err != nil {
-			panic(err)
+			logger.Error("Error during push:"+ err.Error())
+			push_e += 1
+			continue
 		}
 		var outputBuffer bytes.Buffer
 		_, err = io.Copy(io.MultiWriter(&outputBuffer, os.Stdout), pushOut)
 		if err != nil {
 			logger.Error("Error pushing image:" + err.Error())
+			push_e += 1
+			continue
 		}
 
 		capturedOutput := outputBuffer.String()
 
 		if strings.Contains(capturedOutput, "error") {
-			reason[t_image] = "replication failed while pushing this image!"
-		} else {
-			reason[t_image] = "pushed this tagged image into private registry."
+			// reason = "error -> replication:push"
+			push_e += 1
+			continue
 		}
 	}
 
@@ -114,8 +137,14 @@ func replicate(imageReview *v1alpha1.ImageReview) (resultReview *v1alpha1.ImageR
 			logger.Info(p_image + " removed successfully!")
 		}
 	}
-	jsonReason, _ := json.Marshal(reason)
-	resultReview.Status.Reason = string(jsonReason)
+	// jsonReason, _ := json.Marshal(reason)
+	reason := ""
+	if push_e > 0 || pull_e > 0 {
+		reason = "error:replication:pull:" + strconv.Itoa(pull_e) + ",push:" + strconv.Itoa(push_e)
+	} else {
+		reason = "success:replication:pull:" + strconv.Itoa(len(pulled_images)) + ",push:" + strconv.Itoa(len(tagged_images))
+	}
+	resultReview.Status.Reason = string(reason)
 	return
 }
 
