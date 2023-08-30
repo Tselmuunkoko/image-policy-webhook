@@ -13,7 +13,9 @@ type Validate struct {
 
 func (v *Validate) execute(i *v1alpha1.ImageReview) {
 	validate(i)
-	v.next.execute(i)
+	if REPLICATOR_ON || SCANNER_ON {
+		v.next.execute(i)
+	}
 }
 
 func (v *Validate) setNext(next ImagePolicyWebhook) {

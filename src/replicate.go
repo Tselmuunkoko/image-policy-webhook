@@ -15,8 +15,11 @@ import (
 
 func replicate(imageReview *v1alpha1.ImageReview) (resultReview *v1alpha1.ImageReview)  {
 	// pull docker
-	logger.Info("Replication started!")
 	resultReview = imageReview
+	if resultReview.Status.Allowed {
+		return
+	}
+	logger.Info("Replication started!")
 	reason := make(map[string]string)
 	cli, err := client.NewClientWithOpts(client.WithHost(REPLICATOR_ENV_VARS["APP_DOCKER_HOST"]))
 	if err != nil {
