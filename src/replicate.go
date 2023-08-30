@@ -7,68 +7,112 @@ import (
 	"context"
 	"io"
 	"os"
-	"fmt"
 	"encoding/json"
 	"encoding/base64"
+	"strings"
+	"bytes"
 )
 
 func replicate(imageReview *v1alpha1.ImageReview) (resultReview *v1alpha1.ImageReview)  {
 	// pull docker
-	logger.Info("Replication")
+	logger.Info("Replication started!")
 	resultReview = imageReview
-
-	cli, err := client.NewClientWithOpts(client.FromEnv)
+	reason := make(map[string]string)
+	cli, err := client.NewClientWithOpts(client.WithHost(REPLICATOR_ENV_VARS["APP_DOCKER_HOST"]))
 	if err != nil {
 		panic(err)
 	}
-	out, err := cli.ImagePull(context.Background(), "alpine", types.ImagePullOptions{})
-	if err != nil {
-		panic(err)
-	}
-	defer out.Close()
+	
+	pulled_images := []string{}
 
-	// Print the pull progress
-	_, err = io.Copy(os.Stdout, out)
-	if err != nil {
-		fmt.Println("Error copying image pull output:", err)
-		return
-	}
-
-	fmt.Println("Image pulled successfully!")
 	// AUTHENTICATE
 	authConfig := types.AuthConfig{
-		Username: os.Getenv("DOCKER_USERNAME"),
-		Password: os.Getenv("DOCKER_PASSWORD"),
+		Username: REPLICATOR_ENV_VARS["PRIVATE_REGISTRY_USERNAME"],
+		Password: REPLICATOR_ENV_VARS["PRIVATE_REGISTRY_PASSWORD"],
 	}
 	
 	authStr, err := encodeAuth(authConfig)
 	if err != nil {
-		fmt.Println("Error encoding auth config:", err)
+		logger.Error("Error encoding auth config:" + err.Error())
 		return
 	}
+	// PULL
+	prefix := REPLICATOR_ENV_VARS["PRIVATE_REGISTRY_HOST"]
+	namespace := REPLICATOR_ENV_VARS["PRIVATE_REGISTRY_NAMESPACE"]
 
+	for _, container := range imageReview.Spec.Containers {
+		if !strings.HasPrefix(container.Image, prefix) {
+			logger.Info("Trying pull " + container.Image + " image.")
+			out, err := cli.ImagePull(context.Background(), container.Image, types.ImagePullOptions{})
+			if err != nil {
+				panic(err)
+			}
+			defer out.Close()
+
+			// Print the pull progress
+			_, err = io.Copy(os.Stdout, out)
+			if err != nil {
+				logger.Error("Error copying image pull output:" + err.Error())
+				reason[container.Image] = "Couldn't pull this image"
+			} else {
+				pulled_images = append(pulled_images, container.Image)
+				logger.Info(container.Image + " pulled successfully!")
+			}
+		}
+	}
 	// TAG
-	newImageTag := os.Getenv("DOCKER_HOST")+"/alpine:3.18"
-
-	// Tag the pulled image with the new tag
-	err = cli.ImageTag(context.Background(), "alpine", newImageTag)
-	if err != nil {
-		fmt.Println("Error tagging image:", err)
-		return
+	tagged_images := []string{}
+	for _, p_image := range pulled_images {
+		logger.Info("Tagging pulled image "+ p_image)
+		_, _, image, tag, _, err := splitDockerImage(p_image)
+		logger.Info("image: " + image)
+		logger.Info("tag: " + tag)
+		newImageTag := prefix + "/" + namespace + "/" + image + ":" + tag
+		err = cli.ImageTag(context.Background(), p_image, newImageTag)
+		if err != nil {
+			logger.Error("Error tagging image:" + err.Error())
+		} else {
+			tagged_images = append(tagged_images, newImageTag)
+			logger.Info(p_image +" tagged into "+ newImageTag +" successfully!")
+		}
 	}
 
 	// PUSH
-	pushOpts := types.ImagePushOptions{
-		RegistryAuth: authStr,
-	}
-	pushOut, err := cli.ImagePush(context.Background(), newImageTag, pushOpts)
-	if err != nil {
-		fmt.Println("Error pushing image:", err)
-		return
-	}
-	defer pushOut.Close()
+	for _, t_image := range tagged_images {
+		pushOpts := types.ImagePushOptions{
+			RegistryAuth: authStr,
+		}
+		pushOut, err := cli.ImagePush(context.Background(), t_image, pushOpts)
+		defer pushOut.Close()
+		if err != nil {
+			panic(err)
+		}
+		var outputBuffer bytes.Buffer
+		_, err = io.Copy(io.MultiWriter(&outputBuffer, os.Stdout), pushOut)
+		if err != nil {
+			logger.Error("Error pushing image:" + err.Error())
+		}
 
-	fmt.Println("Image pushed successfully!")
+		capturedOutput := outputBuffer.String()
+
+		if strings.Contains(capturedOutput, "error") {
+			reason[t_image] = "replication failed while pushing this image!"
+		} else {
+			reason[t_image] = "pushed this tagged image into private registry."
+		}
+	}
+
+	// REMOVE
+	for _, p_image := range pulled_images {
+		_, err := cli.ImageRemove(context.Background(), p_image, types.ImageRemoveOptions{})
+		if err != nil {
+			logger.Error("Error removing image:" + err.Error())
+		} else {
+			logger.Info(p_image + " removed successfully!")
+		}
+	}
+	jsonReason, _ := json.Marshal(reason)
+	resultReview.Status.Reason = string(jsonReason)
 	return
 }
 
@@ -91,4 +135,34 @@ func (r *Replicate) execute(i *v1alpha1.ImageReview) {
 
 func (r *Replicate) setNext(next ImagePolicyWebhook) {
     r.next = next
+}
+
+func getReplicatorEnv() {
+	replicatorEnvVarsExists := []string{
+		"PRIVATE_REGISTRY_USERNAME",
+		"PRIVATE_REGISTRY_PASSWORD",
+		"PRIVATE_REGISTRY_NAMESPACE",
+		"PRIVATE_REGISTRY_HOST",
+	}
+	replicatorNotFoundVars := []string{}
+	for _, env := range replicatorEnvVarsExists {
+		el, exists := os.LookupEnv(env)
+		if !exists {
+			replicatorNotFoundVars = append(replicatorNotFoundVars, env)
+		} else {
+			REPLICATOR_ENV_VARS[env] = envClean(el)
+		}
+	}
+	if len(replicatorNotFoundVars) != 0 {
+		logger.Info( strings.Join(replicatorNotFoundVars, ", ") + " variables are not found! MUST fill these enviroment variables for REPLICATOR!")
+		return
+	}
+	REPLICATOR_ENV_VARS["APP_DOCKER_HOST"] = os.Getenv("APP_DOCKER_HOST"); if REPLICATOR_ENV_VARS["APP_DOCKER_HOST"] == "" {REPLICATOR_ENV_VARS["APP_DOCKER_HOST"] = "unix:///var/run/docker.sock"}
+}
+
+func envClean(input string) (cleaned string){
+	cleaned = strings.ReplaceAll(input, " ", "")
+	cleaned = strings.ReplaceAll(cleaned, ",", "")
+	cleaned = strings.ReplaceAll(cleaned, "\"", "")
+	return cleaned
 }

@@ -15,6 +15,10 @@ import (
 var logger = zap.Must(zap.NewDevelopment())
 var WHITELIST = []string{}
 var EXCLUDE_NAMESPACES = []string{}
+var DOCKER_HOST = "unix:///var/run/docker.sock"
+var REPLICATOR_ENV_VARS = make(map[string]string)
+var REPLICATOR_ON = false
+var SCANNER_ON = false
 
 func imagePolicyWebhookHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -58,23 +62,12 @@ func imagePolicyWebhookHandler(w http.ResponseWriter, r *http.Request) {
 	validator := &Validate{}
 	replicator := &Replicate{}
 	scanner := &Scan{}
-	replicator_on := false
-	scanner_on := false
 
-	replicator_string, replicator_exists := os.LookupEnv("REPLICATOR_ON")
-	if (replicator_exists) {
-		replicator_on, err = strconv.ParseBool(replicator_string)
-	}
-	scanner_string, scanner_exists := os.LookupEnv("SCANNER_ON")
-	if (scanner_exists) {
-		scanner_on, err = strconv.ParseBool(scanner_string)
-	}
-
-	if (replicator_on) {
+	if (REPLICATOR_ON) {
 			validator.setNext(replicator)
 	}
-	if (scanner_on) {
-		if (replicator_on) {
+	if (SCANNER_ON) {
+		if (REPLICATOR_ON) {
 			replicator.setNext(scanner)
 		} else {
 			validator.setNext(scanner)
@@ -122,12 +115,32 @@ func main() {
 		el = strings.Replace(el, " ", "", -1)
 		WHITELIST[i] = el
 	}
+
 	// GET EXCLUDED NAMESPACES
 	exclude_list := os.Getenv("EXCLUDE_NAMESPACES")
 	EXCLUDE_NAMESPACES = strings.Split(exclude_list, ",")
 	for i, el := range EXCLUDE_NAMESPACES {
 		el = strings.Replace(el, " ", "", -1)
 		EXCLUDE_NAMESPACES[i] = el
+	}
+	// Check replicator env vars
+	replicator_string, replicator_exists := os.LookupEnv("REPLICATOR_ON")
+	if (replicator_exists) {
+		on, err := strconv.ParseBool(replicator_string)
+		if err != nil {
+			panic(err)
+		}
+		REPLICATOR_ON = on
+		getReplicatorEnv()
+	}
+	// Check scanner env vars
+	scanner_string, scanner_exists := os.LookupEnv("SCANNER_ON")
+	if (scanner_exists) {
+		on, err := strconv.ParseBool(scanner_string)
+		if err != nil {
+			panic(err)
+		}
+		SCANNER_ON = on
 	}
 
 	fmt.Printf("Starting server at port %s\n", envVars["PORT"])

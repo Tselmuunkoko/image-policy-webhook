@@ -23,6 +23,7 @@ func (v *Validate) setNext(next ImagePolicyWebhook) {
 const (
 	dockerImagePattern     = `^(?P<registry>.+?\/)?(?P<project>[\w\-]+)\/(?P<image>[\w\-]+):(?P<tag>[\w\-.]+)$`
 	dockerImageHashPattern = `^(?P<registry>.+?\/)?(?P<project>[\w\-]+)\/(?P<image>[\w\-]+)@(?P<hash>sha256:[\w]+)?$`
+	dockerSingleImagePattern = `^(?P<image>[\w\-]+):(?P<tag>[\w\-.]+)$`
 )
 
 func checkWhiteList(registry string) bool {
@@ -47,8 +48,10 @@ func isExcluded(namespace string) bool {
 func splitDockerImage(imageStr string) (registry, project, image, tag, hash string, err error) {
 	re := regexp.MustCompile(dockerImagePattern)
 	re1 := regexp.MustCompile(dockerImageHashPattern)
+	re2 := regexp.MustCompile(dockerSingleImagePattern)
 	matches := re.FindStringSubmatch(imageStr)
 	matches1 := re1.FindStringSubmatch(imageStr)
+	matches2 := re2.FindStringSubmatch(imageStr)
 
 	if len(matches) != 0 {
 		matchMap := make(map[string]string)
@@ -72,6 +75,15 @@ func splitDockerImage(imageStr string) (registry, project, image, tag, hash stri
 		project = matchMap["project"]
 		image = matchMap["image"]
 		hash = matchMap["hash"]
+	} else if len(matches2) != 0 {
+		matchMap := make(map[string]string)
+		for i, name := range re2.SubexpNames() {
+			if i != 0 && name != "" {
+				matchMap[name] = matches2[i]
+			}
+		}
+		image = matchMap["image"]
+		tag = matchMap["tag"]
 	} else {
 		err = fmt.Errorf("invalid image format")
 	}
